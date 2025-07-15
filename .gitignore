@@ -1,0 +1,65 @@
+# .NET Core
+bin/
+obj/
+*.user
+*.userosscache
+*.suo
+*.userprefs
+
+# Visual Studio
+.vs/
+*.cache
+*.lock
+*.log
+*.tmp
+*.user
+*.userosscache
+*.suo
+*.userprefs
+
+# IDE-specific
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build output
+*.dll
+*.exe
+*.pdb
+*.nupkg
+*.nuget
+
+# NuGet packages
+packages/
+
+# Test results
+TestResults/
+*.trx
+*.coverage
+
+# Local NuGet packages
+*.nupkg
+
+# Local build results
+bin/
+obj/
+
+# Visual Studio cache
+.vs/
+
+# Windows image file caches
+Thumbs.db
+ehthumbs.db
+
+# Windows Installer files
+*.cab
+*.msi
+*.msix
+*.msixbundle
+*.appx
+*.appxbundle
+*.appxupload
+
+# Windows shortcuts
+*.lnk
