@@ -64,7 +64,7 @@ namespace LogViewer
 
             if (folderDialog.ShowDialog() == System.Windows.Forms.DialogResult.OK)
             {
-                var patternDialog = new System.Windows.Forms.InputBox
+                var patternDialog = new InputBox
                 {
                     Prompt = "Enter file pattern (e.g., *.log;*.log.*):",
                     DefaultText = "*.log;*.log.*"

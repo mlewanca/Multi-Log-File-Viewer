@@ -1,8 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
+using System.IO;
 using System.Linq;
+using System.Text.RegularExpressions;
 using System.Windows;
+using System.Windows.Media;
+using Microsoft.Win32;
 
 namespace LogViewer
 {
@@ -211,67 +216,5 @@ namespace LogViewer
                 }
             }
         }
-    }
-}
-
-    public class LogFile : INotifyPropertyChanged
-    {
-        public Guid Id { get; set; }
-        public string Name { get; set; }
-        public string FilePath { get; set; }
-        public Brush Color { get; set; }
-        public int LineCount { get; set; }
-        public long FileSize { get; set; }
-
-        public string FileSizeFormatted
-        {
-            get
-            {
-                if (FileSize < 1024) return $"{FileSize} B";
-                if (FileSize < 1024 * 1024) return $"{FileSize / 1024:F1} KB";
-                if (FileSize < 1024 * 1024 * 1024) return $"{FileSize / (1024 * 1024):F1} MB";
-                return $"{FileSize / (1024 * 1024 * 1024):F1} GB";
-            }
-        }
-
-        private string _alias;
-        public string Alias
-        {
-            get => _alias;
-            set
-            {
-                _alias = value;
-                OnPropertyChanged(nameof(Alias));
-            }
-        }
-
-        private bool _isVisible;
-        public bool IsVisible
-        {
-            get => _isVisible;
-            set
-            {
-                _isVisible = value;
-                OnPropertyChanged(nameof(IsVisible));
-                OnPropertyChanged(nameof(VisibilityButtonText));
-            }
-        }
-
-        public string VisibilityButtonText => IsVisible ? "Hide" : "Show";
-
-        public event PropertyChangedEventHandler PropertyChanged;
-        protected virtual void OnPropertyChanged(string propertyName)
-        {
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
-        }
-    }
-
-    public class RecurringLine
-    {
-        public string FileName { get; set; }
-        public string LineText { get; set; }
-        public int Count { get; set; }
-        public bool HasKeywords { get; set; }
-        public bool IsSelectedForExport { get; set; }
     }
 }
