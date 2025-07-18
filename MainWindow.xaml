@@ -1,18 +1,19 @@
 <Window x:Class="LogViewer.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Multi-Log File Viewer" Height="800" Width="1200"
+        Title="Multi-Log File Viewer - Enhanced" Height="800" Width="1200"
         WindowStartupLocation="CenterScreen"
         AllowDrop="True" Drop="Window_Drop" DragOver="Window_DragOver"
         KeyDown="Window_KeyDown">
     
     <Window.InputBindings>
-
         <KeyBinding Key="E" Modifiers="Ctrl" Command="{Binding ExportAllCommand}"/>
         <KeyBinding Key="K" Modifiers="Ctrl" Command="{Binding ExportKeywordsCommand}"/>
         <KeyBinding Key="OemComma" Modifiers="Ctrl" Command="{Binding SettingsCommand}"/>
         <KeyBinding Key="F" Modifiers="Ctrl" Command="{Binding FocusSearchCommand}"/>
         <KeyBinding Key="R" Modifiers="Ctrl" Command="{Binding RefreshCommand}"/>
+        <KeyBinding Key="A" Modifiers="Ctrl" Command="{Binding ShowAnalyticsCommand}"/>
+        <KeyBinding Key="P" Modifiers="Ctrl" Command="{Binding ShowPluginsCommand}"/>
     </Window.InputBindings>
     
     <Grid>
@@ -24,7 +25,7 @@
             <RowDefinition Height="Auto"/>
         </Grid.RowDefinitions>
 
-        <!-- Toolbar -->
+        <!-- Enhanced Toolbar -->
         <ToolBar Grid.Row="0" Height="40">
             <!-- File Operations Group -->
             <TextBlock Text="Files:" VerticalAlignment="Center" Margin="5,0" FontWeight="Bold" FontSize="10" Foreground="DarkBlue"/>
@@ -41,6 +42,9 @@
                      Text="Recent..." IsEditable="False"/>
             <Button Name="ClearAllButton" Content="Clear All" Click="ClearAll_Click" 
                     Padding="10,5" Margin="2,0" ToolTip="Clear all loaded files"/>
+            <Button Name="CancelLoadingButton" Content="Cancel" Click="CancelLoading_Click" 
+                    Padding="10,5" Margin="2,0" ToolTip="Cancel current loading operation" 
+                    Visibility="Collapsed"/>
             <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="10,0"/>
             
             <!-- Search & Filter Group -->
@@ -70,16 +74,16 @@
             <TextBlock Text="Levels:" VerticalAlignment="Center" Margin="5,0" FontWeight="Bold" FontSize="10" Foreground="DarkBlue"/>
             <ToggleButton Name="ErrorFilterButton" Content="ERROR" Padding="5,2" Margin="1,0" 
                          Background="#FFCCCC" Foreground="DarkRed" FontWeight="Bold" FontSize="9"
-                         ToolTip="Show/hide ERROR entries" Click="LogLevelFilter_Click" Tag="ERROR"/>
+                         ToolTip="Show/hide ERROR entries" Click="LogLevelFilter_Click" Tag="ERROR" IsChecked="True"/>
             <ToggleButton Name="WarnFilterButton" Content="WARN" Padding="5,2" Margin="1,0" 
                          Background="#FFFFCC" Foreground="DarkOrange" FontWeight="Bold" FontSize="9"
-                         ToolTip="Show/hide WARN entries" Click="LogLevelFilter_Click" Tag="WARN"/>
+                         ToolTip="Show/hide WARN entries" Click="LogLevelFilter_Click" Tag="WARN" IsChecked="True"/>
             <ToggleButton Name="InfoFilterButton" Content="INFO" Padding="5,2" Margin="1,0" 
                          Background="#CCFFCC" Foreground="DarkGreen" FontWeight="Bold" FontSize="9"
-                         ToolTip="Show/hide INFO entries" Click="LogLevelFilter_Click" Tag="INFO"/>
+                         ToolTip="Show/hide INFO entries" Click="LogLevelFilter_Click" Tag="INFO" IsChecked="True"/>
             <ToggleButton Name="DebugFilterButton" Content="DEBUG" Padding="5,2" Margin="1,0" 
                          Background="#CCCCFF" Foreground="DarkBlue" FontWeight="Bold" FontSize="9"
-                         ToolTip="Show/hide DEBUG entries" Click="LogLevelFilter_Click" Tag="DEBUG"/>
+                         ToolTip="Show/hide DEBUG entries" Click="LogLevelFilter_Click" Tag="DEBUG" IsChecked="True"/>
             <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="10,0"/>
             
             <!-- Time Filter Group -->
@@ -95,6 +99,8 @@
             <Button Name="ExportTimeFilterButton" Content="Export Time Filter" Click="ExportTimeFilter_Click" 
                     Padding="5,2" Margin="2,0" ToolTip="Export filtered results"/>
             <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="10,0"/>
+            
+            <!-- Auto Features -->
             <CheckBox Name="AutoScrollCheckBox" Content="Auto-scroll" IsChecked="True" 
                       VerticalAlignment="Center" Margin="5,0" Checked="AutoScroll_Changed" Unchecked="AutoScroll_Changed">
                 <CheckBox.Style>
@@ -172,7 +178,7 @@
                          IsIndeterminate="True" Visibility="Collapsed"/>
             <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="10,0"/>
             
-            <!-- Export & Settings Group -->
+            <!-- Export & Actions Group -->
             <TextBlock Text="Actions:" VerticalAlignment="Center" Margin="5,0" FontWeight="Bold" FontSize="10" Foreground="DarkBlue"/>
             <Button Name="ExportKeywordsButton" Content="Export Keywords" Click="ExportKeywords_Click" 
                     Padding="10,5" Margin="2,0" ToolTip="Export keyword matches (Ctrl+K)"/>
@@ -182,6 +188,16 @@
                     Padding="10,5" Margin="2,0" ToolTip="Open settings (Ctrl+,)"/>
             <Button Name="ThemeToggleButton" Content="🌙" Click="ThemeToggle_Click" 
                     Padding="8,5" Margin="2,0" ToolTip="Toggle dark/light theme"/>
+            <Separator Style="{StaticResource {x:Static ToolBar.SeparatorStyleKey}}" Margin="10,0"/>
+            
+            <!-- Enhanced Features Group -->
+            <TextBlock Text="Analytics:" VerticalAlignment="Center" Margin="5,0" FontWeight="Bold" FontSize="10" Foreground="DarkBlue"/>
+            <Button Name="ShowAnalyticsButton" Content="📊 Analytics" Click="ShowAnalytics_Click" 
+                    Padding="10,5" Margin="2,0" ToolTip="Show log analytics (Ctrl+A)"/>
+            <Button Name="ShowPluginsButton" Content="🔌 Plugins" Click="ShowPlugins_Click" 
+                    Padding="10,5" Margin="2,0" ToolTip="Manage log parsers (Ctrl+P)"/>
+            <Button Name="ShowDistributionButton" Content="📈 Distribution" Click="ShowLogLevelDistribution_Click" 
+                    Padding="10,5" Margin="2,0" ToolTip="Show log level distribution"/>
         </ToolBar>
 
         <!-- File List Header -->
@@ -286,7 +302,7 @@
             </ListView.ItemTemplate>
         </ListView>
 
-        <!-- Status Bar -->
+        <!-- Enhanced Status Bar -->
         <StatusBar Grid.Row="4" Height="25">
             <StatusBarItem>
                 <TextBlock Name="StatusBarText" Text="Ready"/>
@@ -302,6 +318,10 @@
             <Separator/>
             <StatusBarItem>
                 <TextBlock Name="FilterStatusText" Text="No filters"/>
+            </StatusBarItem>
+            <Separator/>
+            <StatusBarItem>
+                <TextBlock Name="PerformanceText" Text="Memory: 0 MB"/>
             </StatusBarItem>
             <Separator/>
             <StatusBarItem HorizontalAlignment="Right">

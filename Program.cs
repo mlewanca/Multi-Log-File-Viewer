@@ -19,9 +19,402 @@ using System.Xml.Serialization;
 using Microsoft.Win32;
 using System.Globalization;
 using Microsoft.VisualBasic;
+using System.Diagnostics;
+using System.Threading;
+using System.Reflection;
 
 namespace LogViewer
 {
+    // Plugin interface for custom log parsers
+    public interface ILogParser
+    {
+        string Name { get; }
+        string Description { get; }
+        string[] SupportedExtensions { get; }
+        bool CanParse(string filePath);
+        IEnumerable<LogEntry> Parse(string filePath, CancellationToken cancellationToken = default);
+    }
+
+    // Built-in standard log parser
+    public class StandardLogParser : ILogParser
+    {
+        public string Name => "Standard Log Parser";
+        public string Description => "Parses standard text-based log files";
+        public string[] SupportedExtensions => new[] { ".log", ".txt", ".out" };
+
+        public bool CanParse(string filePath)
+        {
+            var ext = Path.GetExtension(filePath).ToLower();
+            return SupportedExtensions.Contains(ext);
+        }
+
+        public IEnumerable<LogEntry> Parse(string filePath, CancellationToken cancellationToken = default)
+        {
+            using var reader = new StreamReader(filePath);
+            string line;
+            int lineNumber = 0;
+
+            while ((line = reader.ReadLine()) != null)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    yield break;
+
+                if (string.IsNullOrWhiteSpace(line)) continue;
+
+                lineNumber++;
+                var timestamp = EnhancedTimestampParser.ParseTimestamp(line);
+
+                yield return new LogEntry
+                {
+                    Content = line,
+                    LineNumber = lineNumber,
+                    Timestamp = timestamp ?? DateTime.MinValue,
+                    HasTimestamp = timestamp.HasValue
+                };
+            }
+        }
+    }
+
+    // Enhanced timestamp parser with multiple format support
+    public static class EnhancedTimestampParser
+    {
+        private static readonly List<TimestampPattern> Patterns = new()
+        {
+            // ISO 8601 formats
+            new TimestampPattern(
+                @"(\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}(?:\.\d{3})?(?:Z|[+-]\d{2}:\d{2})?)",
+                "yyyy-MM-dd HH:mm:ss", "yyyy-MM-ddTHH:mm:ss", "yyyy-MM-dd HH:mm:ss.fff"),
+            
+            // Standard syslog format
+            new TimestampPattern(
+                @"(\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})",
+                "MMM dd HH:mm:ss", "MMM  d HH:mm:ss"),
+            
+            // US format
+            new TimestampPattern(
+                @"(\d{1,2}/\d{1,2}/\d{4}\s+\d{1,2}:\d{2}:\d{2}(?:\s?[AP]M)?)",
+                "M/d/yyyy h:mm:ss tt", "M/d/yyyy HH:mm:ss", "MM/dd/yyyy HH:mm:ss"),
+            
+            // European format
+            new TimestampPattern(
+                @"(\d{1,2}\.\d{1,2}\.\d{4}\s+\d{2}:\d{2}:\d{2})",
+                "d.M.yyyy HH:mm:ss", "dd.MM.yyyy HH:mm:ss"),
+            
+            // Apache log format
+            new TimestampPattern(
+                @"(\d{2}/\w{3}/\d{4}:\d{2}:\d{2}:\d{2}\s+[+-]\d{4})",
+                "dd/MMM/yyyy:HH:mm:ss zzz"),
+            
+            // IIS log format
+            new TimestampPattern(
+                @"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2})",
+                "yyyy-MM-dd HH:mm:ss"),
+            
+            // Custom application format with milliseconds
+            new TimestampPattern(
+                @"(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}\.\d{3})",
+                "yyyy-MM-dd HH:mm:ss.fff")
+        };
+
+        public static DateTime? ParseTimestamp(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return null;
+
+            foreach (var pattern in Patterns)
+            {
+                var match = pattern.Regex.Match(line);
+                if (match.Success)
+                {
+                    var timestampStr = match.Groups[1].Value;
+                    
+                    foreach (var format in pattern.Formats)
+                    {
+                        if (DateTime.TryParseExact(timestampStr, format, CultureInfo.InvariantCulture, 
+                            DateTimeStyles.None, out DateTime result))
+                        {
+                            // If no year specified, assume current year
+                            if (result.Year == 1)
+                            {
+                                result = result.AddYears(DateTime.Now.Year - 1);
+                            }
+                            return result;
+                        }
+                    }
+                }
+            }
+
+            return null;
+        }
+    }
+
+    public class TimestampPattern
+    {
+        public Regex Regex { get; }
+        public string[] Formats { get; }
+
+        public TimestampPattern(string pattern, params string[] formats)
+        {
+            Regex = new Regex(pattern, RegexOptions.Compiled | RegexOptions.IgnoreCase);
+            Formats = formats;
+        }
+    }
+
+    // Performance monitoring
+    public class PerformanceMonitor
+    {
+        private readonly PerformanceCounter _cpuCounter;
+        private readonly PerformanceCounter _memoryCounter;
+        private readonly Timer _updateTimer;
+
+        public event Action<PerformanceMetrics> MetricsUpdated;
+
+        public PerformanceMonitor()
+        {
+            try
+            {
+                _cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total");
+                _memoryCounter = new PerformanceCounter("Memory", "Available MBytes");
+                _updateTimer = new Timer(UpdateMetrics, null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(5));
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to initialize performance counters: {ex.Message}");
+            }
+        }
+
+        private void UpdateMetrics(object state)
+        {
+            try
+            {
+                var metrics = new PerformanceMetrics
+                {
+                    CpuUsage = _cpuCounter?.NextValue() ?? 0,
+                    AvailableMemoryMB = _memoryCounter?.NextValue() ?? 0,
+                    AppMemoryUsageMB = GC.GetTotalMemory(false) / (1024 * 1024),
+                    ThreadCount = Process.GetCurrentProcess().Threads.Count
+                };
+
+                MetricsUpdated?.Invoke(metrics);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to update performance metrics: {ex.Message}");
+            }
+        }
+
+        public void Dispose()
+        {
+            _updateTimer?.Dispose();
+            _cpuCounter?.Dispose();
+            _memoryCounter?.Dispose();
+        }
+    }
+
+    public class PerformanceMetrics
+    {
+        public float CpuUsage { get; set; }
+        public float AvailableMemoryMB { get; set; }
+        public long AppMemoryUsageMB { get; set; }
+        public int ThreadCount { get; set; }
+    }
+
+    // Log analytics
+    public class LogAnalytics
+    {
+        public static LogAnalyticsResult AnalyzeLogEntries(IEnumerable<LogEntry> entries)
+        {
+            var entriesList = entries.ToList();
+            var result = new LogAnalyticsResult();
+
+            // Log level distribution
+            result.LogLevelDistribution = entriesList
+                .GroupBy(e => ExtractLogLevel(e.Content))
+                .ToDictionary(g => g.Key, g => g.Count());
+
+            // Timeline analysis
+            var timelineEntries = entriesList
+                .Where(e => e.HasTimestamp)
+                .OrderBy(e => e.Timestamp)
+                .ToList();
+
+            if (timelineEntries.Any())
+            {
+                result.FirstLogTime = timelineEntries.First().Timestamp;
+                result.LastLogTime = timelineEntries.Last().Timestamp;
+                result.TimeSpan = result.LastLogTime - result.FirstLogTime;
+
+                // Entries per hour
+                result.EntriesPerHour = timelineEntries
+                    .GroupBy(e => e.Timestamp.ToString("yyyy-MM-dd HH:00"))
+                    .ToDictionary(g => g.Key, g => g.Count());
+
+                // Peak activity detection
+                var maxEntriesPerHour = result.EntriesPerHour.Values.Max();
+                result.PeakActivityHours = result.EntriesPerHour
+                    .Where(kvp => kvp.Value == maxEntriesPerHour)
+                    .Select(kvp => kvp.Key)
+                    .ToList();
+            }
+
+            // Error pattern analysis
+            result.ErrorPatterns = AnalyzeErrorPatterns(entriesList);
+
+            // Performance metrics
+            result.TotalEntries = entriesList.Count;
+            result.AverageLineLength = entriesList.Average(e => e.Content.Length);
+            result.UniqueMessages = entriesList.Select(e => e.Content).Distinct().Count();
+
+            return result;
+        }
+
+        private static string ExtractLogLevel(string content)
+        {
+            var upperContent = content.ToUpper();
+            if (upperContent.Contains("FATAL") || upperContent.Contains("CRITICAL")) return "FATAL";
+            if (upperContent.Contains("ERROR") || upperContent.Contains("ERR")) return "ERROR";
+            if (upperContent.Contains("WARN") || upperContent.Contains("WARNING")) return "WARN";
+            if (upperContent.Contains("INFO")) return "INFO";
+            if (upperContent.Contains("DEBUG") || upperContent.Contains("DBG")) return "DEBUG";
+            if (upperContent.Contains("TRACE")) return "TRACE";
+            return "UNKNOWN";
+        }
+
+        private static List<ErrorPattern> AnalyzeErrorPatterns(List<LogEntry> entries)
+        {
+            var errorEntries = entries.Where(e => 
+                e.Content.Contains("error", StringComparison.OrdinalIgnoreCase) ||
+                e.Content.Contains("exception", StringComparison.OrdinalIgnoreCase) ||
+                e.Content.Contains("fail", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            var patterns = new List<ErrorPattern>();
+
+            // Group by similar error messages
+            var errorGroups = errorEntries
+                .GroupBy(e => ExtractErrorSignature(e.Content))
+                .Where(g => g.Count() > 1)
+                .OrderByDescending(g => g.Count())
+                .Take(10);
+
+            foreach (var group in errorGroups)
+            {
+                patterns.Add(new ErrorPattern
+                {
+                    Pattern = group.Key,
+                    Count = group.Count(),
+                    FirstOccurrence = group.Min(e => e.Timestamp),
+                    LastOccurrence = group.Max(e => e.Timestamp),
+                    ExampleMessage = group.First().Content
+                });
+            }
+
+            return patterns;
+        }
+
+        private static string ExtractErrorSignature(string content)
+        {
+            // Extract error signature by removing variable parts
+            var signature = content;
+            
+            // Remove timestamps
+            signature = Regex.Replace(signature, @"\d{4}-\d{2}-\d{2}[\sT]\d{2}:\d{2}:\d{2}", "[TIMESTAMP]");
+            signature = Regex.Replace(signature, @"\w{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}", "[TIMESTAMP]");
+            
+            // Remove numbers that might be variable
+            signature = Regex.Replace(signature, @"\b\d+\b", "[NUM]");
+            
+            // Remove GUIDs
+            signature = Regex.Replace(signature, @"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "[GUID]");
+            
+            // Remove IP addresses
+            signature = Regex.Replace(signature, @"\b(?:\d{1,3}\.){3}\d{1,3}\b", "[IP]");
+            
+            // Remove file paths
+            signature = Regex.Replace(signature, @"[A-Za-z]:\\[^\s]+", "[PATH]");
+            
+            return signature.Trim();
+        }
+    }
+
+    public class LogAnalyticsResult
+    {
+        public Dictionary<string, int> LogLevelDistribution { get; set; } = new();
+        public DateTime FirstLogTime { get; set; }
+        public DateTime LastLogTime { get; set; }
+        public TimeSpan TimeSpan { get; set; }
+        public Dictionary<string, int> EntriesPerHour { get; set; } = new();
+        public List<string> PeakActivityHours { get; set; } = new();
+        public List<ErrorPattern> ErrorPatterns { get; set; } = new();
+        public int TotalEntries { get; set; }
+        public double AverageLineLength { get; set; }
+        public int UniqueMessages { get; set; }
+    }
+
+    public class ErrorPattern
+    {
+        public string Pattern { get; set; }
+        public int Count { get; set; }
+        public DateTime FirstOccurrence { get; set; }
+        public DateTime LastOccurrence { get; set; }
+        public string ExampleMessage { get; set; }
+    }
+
+    // Plugin manager
+    public class PluginManager
+    {
+        private readonly List<ILogParser> _parsers = new();
+
+        public PluginManager()
+        {
+            // Load built-in parsers
+            _parsers.Add(new StandardLogParser());
+            
+            // Load external plugins
+            LoadExternalPlugins();
+        }
+
+        private void LoadExternalPlugins()
+        {
+            try
+            {
+                var pluginPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Plugins");
+                if (!Directory.Exists(pluginPath)) return;
+
+                var pluginFiles = Directory.GetFiles(pluginPath, "*.dll");
+                foreach (var file in pluginFiles)
+                {
+                    try
+                    {
+                        var assembly = Assembly.LoadFrom(file);
+                        var parserTypes = assembly.GetTypes()
+                            .Where(t => typeof(ILogParser).IsAssignableFrom(t) && !t.IsInterface && !t.IsAbstract);
+
+                        foreach (var type in parserTypes)
+                        {
+                            var parser = (ILogParser)Activator.CreateInstance(type);
+                            _parsers.Add(parser);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.WriteLine($"Failed to load plugin {file}: {ex.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"Failed to load plugins: {ex.Message}");
+            }
+        }
+
+        public ILogParser GetParser(string filePath)
+        {
+            return _parsers.FirstOrDefault(p => p.CanParse(filePath)) ?? _parsers.First();
+        }
+
+        public IEnumerable<ILogParser> GetAllParsers() => _parsers;
+    }
+
     public partial class MainWindow : Window
     {
         private ObservableCollection<LogFile> _logFiles;
@@ -37,18 +430,24 @@ namespace LogViewer
         private int _maxLinesPerFile = 50000; // Default line rate limit
         private bool _showLineRateWarning = true;
         
-        // New fields for enhanced features
+        // Enhanced fields
         private HashSet<string> _activeLogLevelFilters = new HashSet<string>();
         private List<string> _recentFiles = new List<string>();
         private const string RECENT_FILES_FILE = "recent_files.txt";
         private const string FILTER_PRESETS_FILE = "filter_presets.xml";
         private const string SETTINGS_FILE = "settings.xml";
         private const int MAX_RECENT_FILES = 10;
-        private const int MAX_DISPLAYED_ENTRIES = 10000; // Virtual scrolling limit
+        private const int MAX_DISPLAYED_ENTRIES = 10000;
         private bool _isDarkTheme = false;
         private List<FilterPreset> _filterPresets = new List<FilterPreset>();
         private bool _autoRefreshEnabled = false;
         private AppSettings _appSettings = new AppSettings();
+
+        // New enhancement fields
+        private PerformanceMonitor _performanceMonitor;
+        private PluginManager _pluginManager;
+        private LogAnalyticsResult _currentAnalytics;
+        private CancellationTokenSource _loadingCancellationToken;
 
         public MainWindow()
         {
@@ -66,6 +465,7 @@ namespace LogViewer
             _logEntriesView.SortDescriptions.Add(new SortDescription("Timestamp", ListSortDirection.Ascending));
             
             InitializeKeyboardCommands();
+            InitializeEnhancements();
             
             // Initialize log level filters (all enabled by default)
             _activeLogLevelFilters.Add("ERROR");
@@ -84,20 +484,76 @@ namespace LogViewer
             LoadFilterPresets();
         }
 
+        private void InitializeEnhancements()
+        {
+            // Initialize performance monitoring
+            _performanceMonitor = new PerformanceMonitor();
+            _performanceMonitor.MetricsUpdated += OnPerformanceMetricsUpdated;
+            
+            // Initialize plugin manager
+            _pluginManager = new PluginManager();
+            
+            // Initialize cancellation token
+            _loadingCancellationToken = new CancellationTokenSource();
+        }
+
+        private void OnPerformanceMetricsUpdated(PerformanceMetrics metrics)
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                try
+                {
+                    var memoryText = $"Memory: {metrics.AppMemoryUsageMB:N0} MB";
+                    var cpuText = $"CPU: {metrics.CpuUsage:F1}%";
+                    var entriesText = $"Entries: {_logEntries.Count:N0}";
+                    
+                    StatusBarText.Text = $"Ready | {memoryText} | {cpuText} | {entriesText}";
+                    
+                    // Update performance warning if needed
+                    if (metrics.AppMemoryUsageMB > 1000) // 1GB threshold
+                    {
+                        StatusBarText.Foreground = Brushes.Orange;
+                    }
+                    else if (metrics.AppMemoryUsageMB > 2000) // 2GB threshold
+                    {
+                        StatusBarText.Foreground = Brushes.Red;
+                    }
+                    else
+                    {
+                        StatusBarText.Foreground = _isDarkTheme ? Brushes.White : Brushes.Black;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.WriteLine($"Error updating performance metrics: {ex.Message}");
+                }
+            }));
+        }
+
         private void Window_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
         {
             if (e.Key == System.Windows.Input.Key.O && Keyboard.Modifiers == ModifierKeys.Control)
             {
                 if (Keyboard.Modifiers.HasFlag(ModifierKeys.Shift))
                 {
-                    // Ctrl+Shift+O: Load Single File
                     LoadSingleFile_Click(sender, new RoutedEventArgs());
                 }
                 else
                 {
-                    // Ctrl+O: Load Folder (backward compatibility)
                     LoadFolder_Click(sender, new RoutedEventArgs());
                 }
+                e.Handled = true;
+            }
+            else if (e.Key == System.Windows.Input.Key.A && Keyboard.Modifiers == ModifierKeys.Control)
+            {
+                // Ctrl+A: Show analytics
+                ShowAnalytics_Click(sender, new RoutedEventArgs());
+                e.Handled = true;
+            }
+            else if (e.Key == System.Windows.Input.Key.P && Keyboard.Modifiers == ModifierKeys.Control)
+            {
+                // Ctrl+P: Show plugins
+                ShowPlugins_Click(sender, new RoutedEventArgs());
                 e.Handled = true;
             }
         }
@@ -121,10 +577,21 @@ namespace LogViewer
                 }
 
                 LoadingIndicator.Visibility = Visibility.Visible;
-                await LoadLogFilesAsync(new[] { fileDialog.FileName });
-                LoadingIndicator.Visibility = Visibility.Collapsed;
+                _loadingCancellationToken = new CancellationTokenSource();
                 
-                // Add parent directory to recent files
+                try
+                {
+                    await LoadLogFilesAsync(new[] { fileDialog.FileName }, _loadingCancellationToken.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    StatusBarText.Text = "Loading cancelled";
+                }
+                finally
+                {
+                    LoadingIndicator.Visibility = Visibility.Collapsed;
+                }
+                
                 var parentDir = Path.GetDirectoryName(fileDialog.FileName);
                 if (!string.IsNullOrEmpty(parentDir))
                 {
@@ -193,17 +660,28 @@ namespace LogViewer
                     }
 
                     LoadingIndicator.Visibility = Visibility.Visible;
-                    await LoadLogFilesAsync(files.ToArray());
-                    LoadingIndicator.Visibility = Visibility.Collapsed;
+                    _loadingCancellationToken = new CancellationTokenSource();
                     
-                    // Add to recent files
+                    try
+                    {
+                        await LoadLogFilesAsync(files.ToArray(), _loadingCancellationToken.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        StatusBarText.Text = "Loading cancelled";
+                    }
+                    finally
+                    {
+                        LoadingIndicator.Visibility = Visibility.Collapsed;
+                    }
+                    
                     AddToRecentFiles(folderDialog.SelectedPath);
                     UpdateRecentFilesDropdown();
                 }
             }
         }
 
-        private async Task LoadLogFilesAsync(string[] filePaths)
+        private async Task LoadLogFilesAsync(string[] filePaths, CancellationToken cancellationToken = default)
         {
             var colorBrushes = new[]
             {
@@ -214,8 +692,13 @@ namespace LogViewer
                 Brushes.PaleVioletRed, Brushes.PapayaWhip, Brushes.PeachPuff, Brushes.Peru
             };
 
+            var tasks = new List<Task>();
+
             foreach (var filePath in filePaths)
             {
+                if (cancellationToken.IsCancellationRequested)
+                    break;
+
                 if (_logFiles.Count >= 20) break;
 
                 var fileName = Path.GetFileName(filePath);
@@ -235,18 +718,33 @@ namespace LogViewer
 
                 _logFiles.Add(logFile);
 
-                // Load file content asynchronously
-                await Task.Run(() => LoadFileContent(logFile));
+                // Load file content asynchronously with enhanced parsing
+                var task = Task.Run(async () => await LoadFileContentEnhanced(logFile, cancellationToken), cancellationToken);
+                tasks.Add(task);
                 
                 // Set up file watcher for auto-reload
                 SetupFileWatcher(filePath);
             }
 
+            // Wait for all files to load
+            try
+            {
+                await Task.WhenAll(tasks);
+            }
+            catch (OperationCanceledException)
+            {
+                // Handle cancellation gracefully
+                return;
+            }
+
+            // Generate analytics
+            _currentAnalytics = LogAnalytics.AnalyzeLogEntries(_logEntries);
+
             RefreshLogEntries();
             AutoSaveConfiguration();
         }
 
-        private void LoadFileContent(LogFile logFile)
+        private async Task LoadFileContentEnhanced(LogFile logFile, CancellationToken cancellationToken = default)
         {
             try
             {
@@ -254,60 +752,60 @@ namespace LogViewer
                 var fileInfo = new FileInfo(logFile.FilePath);
                 logFile.FileSize = fileInfo.Length;
 
-                using var reader = new StreamReader(logFile.FilePath);
-                string line;
-                int lineNumber = 0;
+                // Get appropriate parser
+                var parser = _pluginManager.GetParser(logFile.FilePath);
+                
+                var entries = parser.Parse(logFile.FilePath, cancellationToken);
+                int lineCount = 0;
                 bool showedWarning = false;
 
-                while ((line = reader.ReadLine()) != null)
+                foreach (var entry in entries)
                 {
-                    if (string.IsNullOrWhiteSpace(line)) continue;
+                    if (cancellationToken.IsCancellationRequested)
+                        break;
 
-                    lineNumber++;
-
+                    lineCount++;
+                    
                     // Check line rate limit
-                    if (lineNumber > _maxLinesPerFile && _showLineRateWarning && !showedWarning)
+                    if (lineCount > _maxLinesPerFile && _showLineRateWarning && !showedWarning)
                     {
                         showedWarning = true;
-                        Application.Current.Dispatcher.Invoke(() => 
+                        var continueLoading = await Application.Current.Dispatcher.InvokeAsync(() =>
                         {
                             var result = MessageBox.Show(
-                                $"File '{logFile.Name}' has {lineNumber} lines, which exceeds the limit of {_maxLinesPerFile} lines.\n\n" +
-                                $"Loading large files may impact performance. Do you want to continue loading this file?\n\n" +
+                                $"File '{logFile.Name}' has more than {_maxLinesPerFile} lines.\n\n" +
+                                $"Loading large files may impact performance. Continue loading this file?\n\n" +
                                 $"You can adjust the line limit in Settings.",
                                 "Line Rate Limit Warning",
                                 MessageBoxButton.YesNo,
                                 MessageBoxImage.Warning);
                             
-                            if (result == MessageBoxResult.No)
-                            {
-                                return;
-                            }
+                            return result == MessageBoxResult.Yes;
                         });
+                        
+                        if (!continueLoading)
+                            break;
                     }
 
-                    var timestamp = ParseTimestamp(line);
+                    // Set additional properties
+                    entry.FileId = logFile.Id;
+                    entry.Alias = logFile.Alias;
+                    entry.Color = logFile.Color;
+                    entry.HighlightedContent = GenerateHighlightedContent(entry.Content);
 
-                    var logEntry = new LogEntry
-                    {
-                        Content = line,
-                        LineNumber = lineNumber,
-                        FileId = logFile.Id,
-                        Alias = logFile.Alias,
-                        Color = logFile.Color,
-                        Timestamp = timestamp.HasValue ? timestamp.Value : DateTime.MinValue,
-                        HasTimestamp = timestamp.HasValue,
-                        HighlightedContent = GenerateHighlightedContent(line)
-                    };
-
-                    Application.Current.Dispatcher.Invoke(() => _logEntries.Add(logEntry));
+                    Application.Current.Dispatcher.Invoke(() => _logEntries.Add(entry));
                 }
 
                 Application.Current.Dispatcher.Invoke(() => 
                 {
-                    logFile.LineCount = lineNumber;
+                    logFile.LineCount = lineCount;
                     UpdateStatusBar();
                 });
+            }
+            catch (OperationCanceledException)
+            {
+                // Handle cancellation gracefully
+                throw;
             }
             catch (Exception ex)
             {
@@ -316,34 +814,42 @@ namespace LogViewer
             }
         }
 
-        private DateTime? ParseTimestamp(string line)
+        private void ShowAnalytics_Click(object sender, RoutedEventArgs e)
         {
-            // Match patterns like "Jul 10 08:17:46" or "Jul  1 08:17:46"
-            var regex = new Regex(@"(\w{3})\s+(\d{1,2})\s+(\d{2}):(\d{2}):(\d{2})");
-            var match = regex.Match(line);
-
-            if (match.Success)
+            if (_currentAnalytics == null || _logEntries.Count == 0)
             {
-                var monthMap = new Dictionary<string, int>
-                {
-                    {"Jan", 1}, {"Feb", 2}, {"Mar", 3}, {"Apr", 4}, {"May", 5}, {"Jun", 6},
-                    {"Jul", 7}, {"Aug", 8}, {"Sep", 9}, {"Oct", 10}, {"Nov", 11}, {"Dec", 12}
-                };
-
-                var month = match.Groups[1].Value;
-                var day = int.Parse(match.Groups[2].Value);
-                var hour = int.Parse(match.Groups[3].Value);
-                var minute = int.Parse(match.Groups[4].Value);
-                var second = int.Parse(match.Groups[5].Value);
-
-                if (monthMap.TryGetValue(month, out int monthNum))
-                {
-                    var year = DateTime.Now.Year; // Assume current year
-                    return new DateTime(year, monthNum, day, hour, minute, second);
-                }
+                MessageBox.Show("No log data available for analysis. Please load some log files first.", 
+                    "No Data", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
             }
 
-            return null;
+            var analyticsWindow = new AnalyticsWindow(_currentAnalytics);
+            analyticsWindow.ShowDialog();
+        }
+
+        private void ShowPlugins_Click(object sender, RoutedEventArgs e)
+        {
+            var pluginsWindow = new PluginsWindow(_pluginManager);
+            pluginsWindow.ShowDialog();
+        }
+
+        private void ShowLogLevelDistribution_Click(object sender, RoutedEventArgs e)
+        {
+            if (_currentAnalytics?.LogLevelDistribution == null || !_currentAnalytics.LogLevelDistribution.Any())
+            {
+                MessageBox.Show("No log level data available for analysis.", 
+                    "No Data", MessageBoxButton.OK, MessageBoxImage.Information);
+                return;
+            }
+
+            var distributionWindow = new LogLevelDistributionWindow(_currentAnalytics.LogLevelDistribution);
+            distributionWindow.ShowDialog();
+        }
+
+        // Continue with existing methods...
+        private DateTime? ParseTimestamp(string line)
+        {
+            return EnhancedTimestampParser.ParseTimestamp(line);
         }
 
         private void RefreshLogEntries()
@@ -354,12 +860,37 @@ namespace LogViewer
                 entry.HighlightedContent = GenerateHighlightedContent(entry.Content);
             }
 
+            // Regenerate analytics
+            if (_logEntries.Any())
+            {
+                _currentAnalytics = LogAnalytics.AnalyzeLogEntries(_logEntries);
+            }
+
             ApplyTimeFilter();
         }
 
+        // Add method to cancel loading
+        private void CancelLoading_Click(object sender, RoutedEventArgs e)
+        {
+            _loadingCancellationToken?.Cancel();
+            StatusBarText.Text = "Cancelling loading...";
+        }
+
+        protected override void OnClosed(EventArgs e)
+        {
+            // Cleanup resources
+            _loadingCancellationToken?.Cancel();
+            _performanceMonitor?.Dispose();
+            CleanupFileWatchers();
+            SaveRecentFiles();
+            base.OnClosed(e);
+        }
+
+        // ... [Rest of the existing methods remain the same] ...
+        
         private async Task LoadLogFileAsync(LogFile logFile)
         {
-            await Task.Run(() => LoadFileContent(logFile));
+            await LoadFileContentEnhanced(logFile, CancellationToken.None);
         }
 
         private void UpdateStatusBar()
@@ -371,13 +902,11 @@ namespace LogViewer
                 
                 StatusBarText.Text = "Ready";
                 
-                // Update individual status bar elements if they exist
                 if (FilesCountText != null)
                     FilesCountText.Text = $"Files: {_logFiles.Count}";
                 if (EntriesCountText != null)
                     EntriesCountText.Text = $"Entries: {_logEntries.Count}";
                 
-                // Update filter status if the control exists
                 if (FilterStatusText != null)
                 {
                     var activeFilters = new List<string>();
@@ -389,7 +918,7 @@ namespace LogViewer
                     {
                         activeFilters.Add($"Time: ±{_timeFilterSeconds}s");
                     }
-                    if (_activeLogLevelFilters != null && _activeLogLevelFilters.Count < 4) // Not all levels active
+                    if (_activeLogLevelFilters != null && _activeLogLevelFilters.Count < 4)
                     {
                         activeFilters.Add($"Levels: {string.Join(",", _activeLogLevelFilters)}");
                     }
@@ -398,13 +927,11 @@ namespace LogViewer
                 }
                 else
                 {
-                    // Fallback to original status bar format if new elements don't exist
                     StatusBarText.Text = $"Files: {_logFiles.Count} | Visible: {visibleFiles} | Lines: {totalLines} | Sorted chronologically";
                 }
             }
             catch (Exception ex)
             {
-                // Ignore status bar update errors and use fallback
                 try
                 {
                     StatusBarText.Text = "Ready";
@@ -429,7 +956,6 @@ namespace LogViewer
             var button = (Button)sender;
             var logFile = (LogFile)button.DataContext;
             
-            // Remove log entries for this file
             var entriesToRemove = _logEntries.Where(entry => entry.FileId == logFile.Id).ToList();
             foreach (var entry in entriesToRemove)
             {
@@ -446,7 +972,6 @@ namespace LogViewer
             var textBox = (TextBox)sender;
             var logFile = (LogFile)textBox.DataContext;
             
-            // Update alias in log entries
             foreach (var entry in _logEntries.Where(e => e.FileId == logFile.Id))
             {
                 entry.Alias = textBox.Text;
@@ -459,6 +984,7 @@ namespace LogViewer
         {
             _logFiles.Clear();
             _logEntries.Clear();
+            _currentAnalytics = null;
             UpdateStatusBar();
         }
 
@@ -466,8 +992,6 @@ namespace LogViewer
         {
             ApplyTimeFilter();
         }
-
-
 
         private void SaveLogConfiguration(string filePath)
         {
@@ -535,7 +1059,6 @@ namespace LogViewer
                     return;
                 }
 
-                // Load line rate limit settings
                 if (settingsElement != null)
                 {
                     if (int.TryParse(settingsElement.Attribute("MaxLinesPerFile")?.Value, out int maxLines) && maxLines > 0)
@@ -548,7 +1071,6 @@ namespace LogViewer
                     }
                 }
 
-                // Load keywords
                 _highlightKeywords.Clear();
                 if (keywordElements != null)
                 {
@@ -563,15 +1085,14 @@ namespace LogViewer
                 }
                 else
                 {
-                    // Load default keywords if none in XML
                     LoadDefaultKeywords();
                 }
 
-                // Clear existing files
                 _logFiles.Clear();
                 _logEntries.Clear();
 
                 LoadingIndicator.Visibility = Visibility.Visible;
+                _loadingCancellationToken = new CancellationTokenSource();
 
                 var colorBrushes = new[]
                 {
@@ -583,8 +1104,13 @@ namespace LogViewer
                 };
 
                 int colorIndex = 0;
+                var loadTasks = new List<Task>();
+
                 foreach (var element in logFileElements)
                 {
+                    if (_loadingCancellationToken.Token.IsCancellationRequested)
+                        break;
+
                     var filePathAttr = element.Attribute("FilePath")?.Value;
                     var aliasAttr = element.Attribute("Alias")?.Value;
                     var isVisibleAttr = element.Attribute("IsVisible")?.Value;
@@ -614,13 +1140,20 @@ namespace LogViewer
                     _logFiles.Add(logFile);
                     colorIndex++;
 
-                    // Load file content asynchronously
-                    await Task.Run(() => LoadFileContent(logFile));
+                    var task = Task.Run(async () => await LoadFileContentEnhanced(logFile, _loadingCancellationToken.Token));
+                    loadTasks.Add(task);
                 }
+
+                await Task.WhenAll(loadTasks);
 
                 LoadingIndicator.Visibility = Visibility.Collapsed;
                 RefreshLogEntries();
                 MessageBox.Show($"Configuration loaded from {filePath}", "Load Successful", MessageBoxButton.OK, MessageBoxImage.Information);
+            }
+            catch (OperationCanceledException)
+            {
+                LoadingIndicator.Visibility = Visibility.Collapsed;
+                MessageBox.Show("Loading cancelled.", "Load Cancelled", MessageBoxButton.OK, MessageBoxImage.Information);
             }
             catch (Exception ex)
             {
@@ -674,7 +1207,6 @@ namespace LogViewer
             var words = content.Split(new[] { ' ', '\t', '\n', '\r', '.', ',', ';', ':', '!', '?', '(', ')', '[', ']', '{', '}', '<', '>', '"', '\'', '/', '\\', '|', '=', '+', '-', '*', '&', '%', '$', '#', '@', '~', '`' }, StringSplitOptions.None);
             var separators = new List<string>();
             
-            // Extract separators to reconstruct the original text
             int currentIndex = 0;
             foreach (var word in words)
             {
@@ -697,7 +1229,6 @@ namespace LogViewer
                 }
             }
             
-            // Add any remaining text as separator
             if (currentIndex < content.Length)
             {
                 separators.Add(content.Substring(currentIndex));
@@ -707,16 +1238,13 @@ namespace LogViewer
                 separators.Add("");
             }
 
-            // Build segments
             for (int i = 0; i < words.Length; i++)
             {
-                // Add separator before word
                 if (i < separators.Count && !string.IsNullOrEmpty(separators[i]))
                 {
                     segments.Add(new TextSegment { Text = separators[i], IsHighlighted = false });
                 }
                 
-                // Add word (highlighted if it's a keyword)
                 if (!string.IsNullOrEmpty(words[i]))
                 {
                     bool isKeyword = _highlightKeywords.Contains(words[i]);
@@ -724,7 +1252,6 @@ namespace LogViewer
                 }
             }
             
-            // Add final separator
             if (separators.Count > words.Length && !string.IsNullOrEmpty(separators[words.Length]))
             {
                 segments.Add(new TextSegment { Text = separators[words.Length], IsHighlighted = false });
@@ -732,8 +1259,6 @@ namespace LogViewer
 
             return segments;
         }
-
-
 
         private void LoadDefaultKeywords()
         {
@@ -782,7 +1307,6 @@ namespace LogViewer
                     _highlightKeywords.Add(keyword);
                 }
 
-                // Refresh the log entries to apply highlighting
                 RefreshLogEntries();
                 
                 MessageBox.Show($"Loaded {_highlightKeywords.Count} keywords from {filePath}", "Keywords Loaded", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -792,10 +1316,6 @@ namespace LogViewer
                 MessageBox.Show($"Error loading keywords: {ex.Message}", "Load Error", MessageBoxButton.OK, MessageBoxImage.Error);
             }
         }
-
-
-
-
 
         private void ExportAll_Click(object sender, RoutedEventArgs e)
         {
@@ -949,18 +1469,15 @@ namespace LogViewer
                 var logEntry = (LogEntry)entry;
                 var logFile = _logFiles.FirstOrDefault(f => f.Id == logEntry.FileId);
                 
-                // Check if file is visible
                 if (logFile?.IsVisible != true)
                     return false;
                 
-                // Apply search filter
                 if (!string.IsNullOrEmpty(SearchTextBox.Text))
                 {
                     if (!logEntry.Content.Contains(SearchTextBox.Text, StringComparison.OrdinalIgnoreCase))
                         return false;
                 }
                 
-                // Apply time filter
                 if (_timeFilterCenter.HasValue)
                 {
                     var timeDiff = Math.Abs((logEntry.Timestamp - _timeFilterCenter.Value).TotalSeconds);
@@ -973,7 +1490,6 @@ namespace LogViewer
             _logEntriesView.View.Refresh();
             UpdateStatusBar();
             
-            // Auto-scroll to latest entry after filtering
             Dispatcher.BeginInvoke(new Action(() => ScrollToLatestEntry()), System.Windows.Threading.DispatcherPriority.Background);
         }
 
@@ -994,7 +1510,6 @@ namespace LogViewer
 
                 watcher.Changed += async (sender, e) =>
                 {
-                    // Debounce file changes (wait 500ms)
                     await Task.Delay(500);
                     
                     await Dispatcher.InvokeAsync(async () =>
@@ -1007,7 +1522,6 @@ namespace LogViewer
             }
             catch (Exception ex)
             {
-                // Silently handle file watcher setup errors
                 System.Diagnostics.Debug.WriteLine($"Failed to setup file watcher for {filePath}: {ex.Message}");
             }
         }
@@ -1019,20 +1533,16 @@ namespace LogViewer
                 var logFile = _logFiles.FirstOrDefault(f => f.FilePath == filePath);
                 if (logFile == null) return;
 
-                // Remove existing entries for this file
                 var existingEntries = _logEntries.Where(e => e.FileId == logFile.Id).ToList();
                 foreach (var entry in existingEntries)
                 {
                     _logEntries.Remove(entry);
                 }
 
-                // Reload the file
-                await LoadLogFileAsync(logFile);
+                await LoadFileContentEnhanced(logFile, CancellationToken.None);
                 
-                // Reapply filters
                 ApplyTimeFilter();
                 
-                // Auto-scroll to latest entry after reload
                 Dispatcher.BeginInvoke(new Action(() => ScrollToLatestEntry()), System.Windows.Threading.DispatcherPriority.Background);
             }
             catch (Exception ex)
@@ -1090,14 +1600,12 @@ namespace LogViewer
                             var logFile = _logFiles.FirstOrDefault(f => f.Id == entry.FileId);
                             if (logFile?.IsVisible != true) return false;
                             
-                            // Apply search filter
                             if (!string.IsNullOrEmpty(SearchTextBox.Text))
                             {
                                 if (!entry.Content.Contains(SearchTextBox.Text, StringComparison.OrdinalIgnoreCase))
                                     return false;
                             }
                             
-                            // Apply time filter
                             var timeDiff = Math.Abs((entry.Timestamp - _timeFilterCenter.Value).TotalSeconds);
                             return timeDiff <= _timeFilterSeconds;
                         })
@@ -1110,1083 +1618,4 @@ namespace LogViewer
                     content.AppendLine($"# Time range: ±{_timeFilterSeconds} seconds");
                     content.AppendLine($"# Total filtered entries: {filteredEntries.Count}");
                     
-                    if (!string.IsNullOrEmpty(SearchTextBox.Text))
-                    {
-                        content.AppendLine($"# Search filter: '{SearchTextBox.Text}'");
-                    }
-                    
-                    var visibleFiles = _logFiles.Where(f => f.IsVisible).Select(f => f.Alias).ToList();
-                    content.AppendLine($"# Files: {string.Join(", ", visibleFiles)}");
-                    content.AppendLine();
-
-                    foreach (var entry in filteredEntries)
-                    {
-                        content.AppendLine($"[{entry.Alias}] {entry.Timestamp:yyyy-MM-dd HH:mm:ss} {entry.Content}");
-                    }
-
-                    File.WriteAllText(saveDialog.FileName, content.ToString());
-                    MessageBox.Show($"Time filtered log entries exported to {saveDialog.FileName}\n\nTotal entries: {filteredEntries.Count}", "Export Successful", MessageBoxButton.OK, MessageBoxImage.Information);
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Error exporting time filtered entries: {ex.Message}", "Export Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                }
-            }
-        }
-
-        protected override void OnClosed(EventArgs e)
-        {
-            CleanupFileWatchers();
-            SaveRecentFiles();
-            base.OnClosed(e);
-        }
-        
-        #region Enhanced UI Features
-        
-        private void InitializeKeyboardCommands()
-        {
-            // Note: Keyboard bindings are handled in XAML, but we can add command logic here if needed
-            // For now, we'll use the existing Click event handlers
-        }
-        
-        private void LogLevelFilter_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is ToggleButton button && button.Tag is string logLevel)
-            {
-                if (button.IsChecked == true)
-                {
-                    _activeLogLevelFilters.Add(logLevel);
-                }
-                else
-                {
-                    _activeLogLevelFilters.Remove(logLevel);
-                }
-                
-                ApplyLogLevelFilter();
-                UpdateStatusBar();
-            }
-        }
-        
-        private void ApplyLogLevelFilter()
-        {
-            if (_logEntriesView?.View != null)
-            {
-                _logEntriesView.View.Filter = entry =>
-                {
-                    if (entry is LogEntry logEntry)
-                    {
-                        // Check if the log file is visible
-                        var logFile = _logFiles.FirstOrDefault(f => f.Id == logEntry.FileId);
-                        if (logFile?.IsVisible != true) return false;
-                        
-                        // Apply advanced search filter
-                        if (!ApplyAdvancedSearchFilter(logEntry))
-                            return false;
-                        
-                        // Apply log level filter
-                        var entryLevel = ExtractLogLevel(logEntry.Content);
-                        if (!string.IsNullOrEmpty(entryLevel) && !_activeLogLevelFilters.Contains(entryLevel))
-                        {
-                            return false;
-                        }
-                        
-                        return true;
-                    }
-                    return false;
-                };
-            }
-        }
-        
-        private bool ApplyAdvancedSearchFilter(LogEntry logEntry)
-        {
-            var searchText = SearchTextBox?.Text;
-            if (string.IsNullOrEmpty(searchText))
-                return true;
-                
-            try
-            {
-                var isRegex = RegexSearchCheckBox?.IsChecked == true;
-                var isCaseSensitive = CaseSensitiveCheckBox?.IsChecked == true;
-                var searchColumn = (SearchColumnComboBox?.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "All";
-                
-                var comparisonType = isCaseSensitive ? StringComparison.Ordinal : StringComparison.OrdinalIgnoreCase;
-                
-                // Get the log file for file-based search
-                var logFile = _logFiles.FirstOrDefault(f => f.Id == logEntry.FileId);
-                
-                if (isRegex)
-                {
-                    var regexOptions = isCaseSensitive ? RegexOptions.None : RegexOptions.IgnoreCase;
-                    var regex = new Regex(searchText, regexOptions);
-                    
-                    return searchColumn switch
-                    {
-                        "Content" => regex.IsMatch(logEntry.Content),
-                        "Timestamp" => regex.IsMatch(logEntry.TimestampString),
-                        "File" => logFile != null && regex.IsMatch(logFile.Alias ?? logFile.Name),
-                        _ => regex.IsMatch(logEntry.Content) || 
-                             regex.IsMatch(logEntry.TimestampString) || 
-                             (logFile != null && regex.IsMatch(logFile.Alias ?? logFile.Name))
-                    };
-                }
-                else
-                {
-                    return searchColumn switch
-                    {
-                        "Content" => logEntry.Content.Contains(searchText, comparisonType),
-                        "Timestamp" => logEntry.TimestampString.Contains(searchText, comparisonType),
-                        "File" => logFile != null && (logFile.Alias ?? logFile.Name).Contains(searchText, comparisonType),
-                        _ => logEntry.Content.Contains(searchText, comparisonType) || 
-                             logEntry.TimestampString.Contains(searchText, comparisonType) || 
-                             (logFile != null && (logFile.Alias ?? logFile.Name).Contains(searchText, comparisonType))
-                    };
-                }
-            }
-            catch (Exception)
-            {
-                // If regex is invalid, fall back to simple string search
-                return logEntry.Content.Contains(searchText, StringComparison.OrdinalIgnoreCase);
-            }
-        }
-        
-        private void SearchOptions_Changed(object sender, RoutedEventArgs e)
-        {
-            ApplyLogLevelFilter();
-            UpdateStatusBar();
-        }
-        
-        private string ExtractLogLevel(string content)
-        {
-            // Simple log level extraction - look for common patterns
-            var upperContent = content.ToUpper();
-            if (upperContent.Contains("ERROR") || upperContent.Contains("ERR")) return "ERROR";
-            if (upperContent.Contains("WARN") || upperContent.Contains("WARNING")) return "WARN";
-            if (upperContent.Contains("INFO")) return "INFO";
-            if (upperContent.Contains("DEBUG") || upperContent.Contains("DBG")) return "DEBUG";
-            return "INFO"; // Default to INFO if no level detected
-        }
-        
-
-        
-        private void LoadRecentFiles()
-        {
-            try
-            {
-                if (File.Exists(RECENT_FILES_FILE))
-                {
-                    var lines = File.ReadAllLines(RECENT_FILES_FILE);
-                    _recentFiles = lines.Where(line => !string.IsNullOrWhiteSpace(line) && Directory.Exists(line))
-                        .Take(MAX_RECENT_FILES)
-                        .ToList();
-                }
-                
-                // Update the dropdown
-                UpdateRecentFilesDropdown();
-            }
-            catch (Exception ex)
-            {
-                // Ignore recent files loading errors
-            }
-        }
-        
-        private void UpdateRecentFilesDropdown()
-        {
-            try
-            {
-                RecentFilesComboBox.Items.Clear();
-                foreach (var recentFile in _recentFiles)
-                {
-                    var displayName = Path.GetFileName(recentFile);
-                    if (string.IsNullOrEmpty(displayName))
-                        displayName = recentFile;
-                    
-                    RecentFilesComboBox.Items.Add(new ComboBoxItem
-                    {
-                        Content = displayName,
-                        Tag = recentFile,
-                        ToolTip = recentFile
-                    });
-                }
-                
-                RecentFilesComboBox.IsEnabled = _recentFiles.Count > 0;
-            }
-            catch (Exception ex)
-            {
-                // Ignore dropdown update errors
-            }
-        }
-        
-        private async void RecentFiles_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (sender is ComboBox comboBox && comboBox.SelectedItem is ComboBoxItem item && item.Tag is string folderPath)
-            {
-                try
-                {
-                    // Load files from the selected recent folder
-                    var patterns = new[] { "*.log", "*.log.*" };
-                    var files = new List<string>();
-                    
-                    foreach (var pattern in patterns)
-                    {
-                        files.AddRange(Directory.GetFiles(folderPath, pattern));
-                    }
-                    
-                    if (files.Count > 0)
-                    {
-                        await LoadLogFilesAsync(files.ToArray());
-                        AddToRecentFiles(folderPath);
-                        UpdateRecentFilesDropdown();
-                    }
-                    else
-                    {
-                        MessageBox.Show($"No log files found in {folderPath}", "No Files Found", MessageBoxButton.OK, MessageBoxImage.Information);
-                    }
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Error loading recent files: {ex.Message}", "Load Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                }
-                finally
-                {
-                    comboBox.SelectedIndex = -1; // Reset selection
-                }
-            }
-        }
-        
-        private void SaveRecentFiles()
-        {
-            try
-            {
-                File.WriteAllLines(RECENT_FILES_FILE, _recentFiles.Take(MAX_RECENT_FILES));
-            }
-            catch (Exception ex)
-            {
-                // Ignore recent files saving errors
-            }
-        }
-        
-        private void AddToRecentFiles(string folderPath)
-        {
-            if (string.IsNullOrWhiteSpace(folderPath) || !Directory.Exists(folderPath))
-                return;
-                
-            _recentFiles.Remove(folderPath); // Remove if already exists
-            _recentFiles.Insert(0, folderPath); // Add to beginning
-            
-            if (_recentFiles.Count > MAX_RECENT_FILES)
-            {
-                _recentFiles = _recentFiles.Take(MAX_RECENT_FILES).ToList();
-            }
-        }
-        
-        private void Window_DragOver(object sender, DragEventArgs e)
-        {
-            if (e.Data.GetDataPresent(DataFormats.FileDrop))
-            {
-                var files = (string[])e.Data.GetData(DataFormats.FileDrop);
-                var logFiles = files.Where(f => Path.GetExtension(f).ToLower().Contains("log") || 
-                                               f.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))
-                                   .ToArray();
-                
-                if (logFiles.Length > 0)
-                {
-                    e.Effects = DragDropEffects.Copy;
-                    e.Handled = true;
-                    return;
-                }
-            }
-            
-            e.Effects = DragDropEffects.None;
-            e.Handled = true;
-        }
-        
-        private async void Window_Drop(object sender, DragEventArgs e)
-        {
-            if (e.Data.GetDataPresent(DataFormats.FileDrop))
-            {
-                var files = (string[])e.Data.GetData(DataFormats.FileDrop);
-                var logFiles = files.Where(f => Path.GetExtension(f).ToLower().Contains("log") || 
-                                               f.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))
-                                   .ToArray();
-                
-                if (logFiles.Length > 0)
-                {
-                    try
-                    {
-                        if (_logFiles.Count + logFiles.Length > 20)
-                        {
-                            MessageBox.Show($"Dropping {logFiles.Length} files would exceed the maximum limit of 20 files.", 
-                                "Maximum Files Reached", MessageBoxButton.OK, MessageBoxImage.Warning);
-                            return;
-                        }
-                        
-                        LoadingIndicator.Visibility = Visibility.Visible;
-                        await LoadLogFilesAsync(logFiles);
-                        LoadingIndicator.Visibility = Visibility.Collapsed;
-                        
-                        // Add the parent directories to recent files
-                        var directories = logFiles.Select(f => Path.GetDirectoryName(f))
-                                                 .Distinct()
-                                                 .Where(d => !string.IsNullOrEmpty(d))
-                                                 .ToArray();
-                        
-                        foreach (var dir in directories)
-                        {
-                            AddToRecentFiles(dir);
-                        }
-                        UpdateRecentFilesDropdown();
-                        
-                        StatusBarText.Text = $"Loaded {logFiles.Length} files via drag & drop";
-                    }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show($"Error loading dropped files: {ex.Message}", 
-                            "Load Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                    }
-                }
-                else
-                {
-                    MessageBox.Show("No valid log files found in the dropped items.", 
-                        "Invalid Files", MessageBoxButton.OK, MessageBoxImage.Information);
-                }
-            }
-        }
-        
-        private void SavePreset_Click(object sender, RoutedEventArgs e)
-        {
-            var presetName = Microsoft.VisualBasic.Interaction.InputBox(
-                "Enter a name for this filter preset:", 
-                "Save Filter Preset", 
-                $"Preset {_filterPresets.Count + 1}");
-                
-            if (!string.IsNullOrWhiteSpace(presetName))
-            {
-                var preset = new FilterPreset
-                {
-                    Name = presetName,
-                    SearchText = SearchTextBox?.Text ?? "",
-                    IsRegex = RegexSearchCheckBox?.IsChecked == true,
-                    IsCaseSensitive = CaseSensitiveCheckBox?.IsChecked == true,
-                    SearchColumn = (SearchColumnComboBox?.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "All",
-                    ActiveLogLevels = new HashSet<string>(_activeLogLevelFilters),
-                    TimeFilterSeconds = _timeFilterSeconds
-                };
-                
-                // Remove existing preset with same name
-                _filterPresets.RemoveAll(p => p.Name == presetName);
-                _filterPresets.Add(preset);
-                
-                SaveFilterPresets();
-                UpdateFilterPresetsDropdown();
-                
-                StatusBarText.Text = $"Filter preset '{presetName}' saved";
-            }
-        }
-        
-        private void FilterPreset_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (sender is ComboBox comboBox && comboBox.SelectedItem is ComboBoxItem item && item.Tag is FilterPreset preset)
-            {
-                try
-                {
-                    // Apply the preset
-                    SearchTextBox.Text = preset.SearchText;
-                    RegexSearchCheckBox.IsChecked = preset.IsRegex;
-                    CaseSensitiveCheckBox.IsChecked = preset.IsCaseSensitive;
-                    
-                    // Set search column
-                    foreach (ComboBoxItem columnItem in SearchColumnComboBox.Items)
-                    {
-                        if (columnItem.Content.ToString() == preset.SearchColumn)
-                        {
-                            SearchColumnComboBox.SelectedItem = columnItem;
-                            break;
-                        }
-                    }
-                    
-                    // Set log level filters
-                    _activeLogLevelFilters = new HashSet<string>(preset.ActiveLogLevels);
-                    ErrorFilterButton.IsChecked = _activeLogLevelFilters.Contains("ERROR");
-                    WarnFilterButton.IsChecked = _activeLogLevelFilters.Contains("WARN");
-                    InfoFilterButton.IsChecked = _activeLogLevelFilters.Contains("INFO");
-                    DebugFilterButton.IsChecked = _activeLogLevelFilters.Contains("DEBUG");
-                    
-                    _timeFilterSeconds = preset.TimeFilterSeconds;
-                    TimeFilterTextBox.Text = preset.TimeFilterSeconds.ToString();
-                    
-                    // Apply filters
-                    ApplyLogLevelFilter();
-                    UpdateStatusBar();
-                    
-                    StatusBarText.Text = $"Applied filter preset '{preset.Name}'";
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Error applying filter preset: {ex.Message}", "Preset Error", MessageBoxButton.OK, MessageBoxImage.Error);
-                }
-                finally
-                {
-                    comboBox.SelectedIndex = 0; // Reset to "Presets..."
-                }
-            }
-        }
-        
-        private void LoadFilterPresets()
-        {
-            try
-            {
-                if (File.Exists(FILTER_PRESETS_FILE))
-                {
-                    var serializer = new XmlSerializer(typeof(List<FilterPreset>));
-                    using (var reader = new FileStream(FILTER_PRESETS_FILE, FileMode.Open, FileAccess.Read))
-                    {
-                        _filterPresets = (List<FilterPreset>)serializer.Deserialize(reader) ?? new List<FilterPreset>();
-                    }
-                }
-                
-                UpdateFilterPresetsDropdown();
-            }
-            catch (Exception ex)
-            {
-                // Ignore filter presets loading errors
-                _filterPresets = new List<FilterPreset>();
-            }
-        }
-        
-        private void SaveFilterPresets()
-        {
-            try
-            {
-                var serializer = new XmlSerializer(typeof(List<FilterPreset>));
-                using (var writer = new FileStream(FILTER_PRESETS_FILE, FileMode.Create, FileAccess.Write))
-                {
-                    serializer.Serialize(writer, _filterPresets);
-                }
-            }
-            catch (Exception ex)
-            {
-                // Ignore filter presets saving errors
-            }
-        }
-        
-        private void UpdateFilterPresetsDropdown()
-        {
-            try
-            {
-                // Clear existing items except the first one
-                while (FilterPresetsComboBox.Items.Count > 1)
-                {
-                    FilterPresetsComboBox.Items.RemoveAt(1);
-                }
-                
-                foreach (var preset in _filterPresets)
-                {
-                    FilterPresetsComboBox.Items.Add(new ComboBoxItem
-                    {
-                        Content = preset.Name,
-                        Tag = preset,
-                        ToolTip = $"Search: '{preset.SearchText}', Levels: {string.Join(",", preset.ActiveLogLevels)}"
-                    });
-                }
-                
-                FilterPresetsComboBox.IsEnabled = _filterPresets.Count > 0;
-            }
-            catch (Exception ex)
-            {
-                // Ignore dropdown update errors
-            }
-        }
-        
-        private void ExportToText(string fileName, List<LogEntry> entries)
-        {
-            using (var writer = new StreamWriter(fileName))
-            {
-                writer.WriteLine($"# Exported Log Entries - {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-                writer.WriteLine($"# Total entries: {entries.Count}");
-                writer.WriteLine($"# Files: {string.Join(", ", _logFiles.Where(f => f.IsVisible).Select(f => f.Alias))}");
-                writer.WriteLine();
-
-                foreach (var entry in entries)
-                {
-                    var timestamp = entry.HasTimestamp ? entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss") : "";
-                    writer.WriteLine($"[{entry.Alias}] {timestamp} {entry.Content}");
-                }
-            }
-        }
-        
-        private void ExportToCsv(string fileName, List<LogEntry> entries)
-        {
-            using (var writer = new StreamWriter(fileName))
-            {
-                // Write CSV header
-                writer.WriteLine("Timestamp,File,LineNumber,Content");
-                
-                foreach (var entry in entries)
-                {
-                    var timestamp = entry.HasTimestamp ? entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss") : "";
-                    var content = entry.Content.Replace("\"", "\\\"").Replace("\n", "\\n").Replace("\r", "\\r");
-                    writer.WriteLine($"\"{timestamp}\",\"{entry.Alias}\",{entry.LineNumber},\"{content}\"");
-                }
-            }
-        }
-        
-        private void ExportToJson(string fileName, List<LogEntry> entries)
-        {
-            var exportData = new
-            {
-                ExportInfo = new
-                {
-                    ExportDate = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
-                    TotalEntries = entries.Count,
-                    Files = _logFiles.Where(f => f.IsVisible).Select(f => f.Alias).ToArray()
-                },
-                LogEntries = entries.Select(entry => new
-                {
-                    Timestamp = entry.HasTimestamp ? entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss") : null,
-                    File = entry.Alias,
-                    LineNumber = entry.LineNumber,
-                    Content = entry.Content
-                }).ToArray()
-            };
-            
-            var json = System.Text.Json.JsonSerializer.Serialize(exportData, new System.Text.Json.JsonSerializerOptions
-            {
-                WriteIndented = true
-            });
-            
-            File.WriteAllText(fileName, json);
-        }
-        
-        private void ExportToXml(string fileName, List<LogEntry> entries)
-        {
-            var doc = new XDocument(
-                new XElement("LogExport",
-                    new XElement("ExportInfo",
-                        new XElement("ExportDate", DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss")),
-                        new XElement("TotalEntries", entries.Count),
-                        new XElement("Files", 
-                            _logFiles.Where(f => f.IsVisible).Select(f => new XElement("File", f.Alias))
-                        )
-                    ),
-                    new XElement("LogEntries",
-                        entries.Select(entry => new XElement("LogEntry",
-                            new XElement("Timestamp", entry.HasTimestamp ? entry.Timestamp.ToString("yyyy-MM-dd HH:mm:ss") : ""),
-                            new XElement("File", entry.Alias),
-                            new XElement("LineNumber", entry.LineNumber),
-                            new XElement("Content", entry.Content)
-                        ))
-                    )
-                )
-            );
-            
-            doc.Save(fileName);
-        }
-        
-        private void AutoRefresh_Changed(object sender, RoutedEventArgs e)
-        {
-            _autoRefreshEnabled = AutoRefreshCheckBox?.IsChecked == true;
-            
-            if (_autoRefreshEnabled)
-            {
-                // Enable file watchers for all loaded files
-                foreach (var logFile in _logFiles)
-                {
-                    SetupFileWatcher(logFile.FilePath);
-                }
-                StatusBarText.Text = "Auto-refresh enabled";
-            }
-            else
-            {
-                // Disable all file watchers
-                CleanupFileWatchers();
-                StatusBarText.Text = "Auto-refresh disabled";
-            }
-        }
-        
-        private void OptimizeDisplayForLargeFiles()
-        {
-            // Implement virtual scrolling by limiting displayed entries
-            if (_logEntries.Count > MAX_DISPLAYED_ENTRIES)
-            {
-                StatusBarText.Text = $"Showing first {MAX_DISPLAYED_ENTRIES} entries (total: {_logEntries.Count}). Use filters to narrow results.";
-                
-                // Show only the first MAX_DISPLAYED_ENTRIES for performance
-                var displayEntries = _logEntries.Take(MAX_DISPLAYED_ENTRIES).ToList();
-                StatusBarText.Text = $"Showing {MAX_DISPLAYED_ENTRIES} of {_logEntries.Count} entries (performance mode)";
-                
-                // Show warning about truncation
-                if (_showLineRateWarning)
-                {
-                    var result = MessageBox.Show(
-                        $"Large number of log entries detected ({_logEntries.Count:N0}). " +
-                        $"Displaying only the first {MAX_DISPLAYED_ENTRIES:N0} entries for performance. " +
-                        $"Use filters to narrow down results.\n\nDo you want to continue?",
-                        "Performance Warning",
-                        MessageBoxButton.YesNo,
-                        MessageBoxImage.Warning);
-                        
-                    if (result == MessageBoxResult.No)
-                    {
-                        return;
-                    }
-                }
-            }
-        }
-        
-        private void AddBookmark(LogEntry entry)
-        {
-            // Simple bookmark implementation - could be enhanced with persistent storage
-            var bookmarkText = $"[{entry.Alias}] {entry.TimestampString} - {entry.Content.Substring(0, Math.Min(50, entry.Content.Length))}...";
-            
-            // For now, just copy to clipboard as a simple bookmark
-            Clipboard.SetText($"Bookmark: {bookmarkText}");
-            StatusBarText.Text = "Bookmark copied to clipboard";
-        }
-        
-        private void AddBookmark_Click(object sender, RoutedEventArgs e)
-        {
-            if (LogEntriesListView.SelectedItem is LogEntry selectedEntry)
-            {
-                AddBookmark(selectedEntry);
-            }
-        }
-        
-        private void CopyLine_Click(object sender, RoutedEventArgs e)
-        {
-            if (LogEntriesListView.SelectedItem is LogEntry selectedEntry)
-            {
-                var lineText = $"[{selectedEntry.Alias}] {selectedEntry.TimestampString} {selectedEntry.Content}";
-                Clipboard.SetText(lineText);
-                StatusBarText.Text = "Line copied to clipboard";
-            }
-        }
-        
-        private void FilterByFile_Click(object sender, RoutedEventArgs e)
-        {
-            if (LogEntriesListView.SelectedItem is LogEntry selectedEntry)
-            {
-                var logFile = _logFiles.FirstOrDefault(f => f.Id == selectedEntry.FileId);
-                if (logFile != null)
-                {
-                    SearchTextBox.Text = "";
-                    SearchColumnComboBox.SelectedIndex = 3; // File column
-                    SearchTextBox.Text = logFile.Alias ?? logFile.Name;
-                    ApplyLogLevelFilter();
-                    StatusBarText.Text = $"Filtered by file: {logFile.Alias ?? logFile.Name}";
-                }
-            }
-        }
-        
-        private void FilterByTime_Click(object sender, RoutedEventArgs e)
-        {
-            if (LogEntriesListView.SelectedItem is LogEntry selectedEntry && selectedEntry.HasTimestamp)
-            {
-                _timeFilterCenter = selectedEntry.Timestamp;
-                TimeFilterTextBox.Text = "30";
-                _timeFilterSeconds = 30;
-                ApplyTimeFilter();
-                StatusBarText.Text = $"Time filter centered on: {selectedEntry.TimestampString}";
-            }
-        }
-        
-        private void Settings_Click(object sender, RoutedEventArgs e)
-        {
-            var settingsWindow = new SettingsWindow(_logFiles, _highlightKeywords, _maxLinesPerFile, _showLineRateWarning, _appSettings);
-            if (settingsWindow.ShowDialog() == true)
-            {
-                // Update UI with new settings
-                ThemeToggleButton.Content = _appSettings.DefaultDarkTheme ? "☀️" : "🌙";
-                _autoScroll = _appSettings.AutoScrollEnabled;
-                _autoRefreshEnabled = _appSettings.AutoRefreshEnabled;
-                _maxLinesPerFile = _appSettings.MaxDisplayedEntries;
-                ApplyTheme();
-                
-                // Save settings
-                SaveSettings();
-            }
-        }
-        
-        private void ShowThemeSettings()
-        {
-            var currentTheme = _appSettings.DefaultDarkTheme ? "Dark" : "Light";
-            var message = $"Current default theme: {currentTheme}\n\nChoose default theme for application startup:";
-            
-            var result = MessageBox.Show(message + "\n\nClick 'Yes' for Dark theme, 'No' for Light theme, 'Cancel' to keep current setting.", 
-                                       "Theme Settings", 
-                                       MessageBoxButton.YesNoCancel, 
-                                       MessageBoxImage.Question);
-            
-            if (result != MessageBoxResult.Cancel)
-            {
-                var oldDarkTheme = _isDarkTheme;
-                var newDefaultDarkTheme = (result == MessageBoxResult.Yes);
-                
-                _appSettings.DefaultDarkTheme = newDefaultDarkTheme;
-                _isDarkTheme = newDefaultDarkTheme;
-                
-                // Apply theme if it changed
-                if (oldDarkTheme != _isDarkTheme)
-                {
-                    ApplyTheme();
-                    ThemeToggleButton.Content = _isDarkTheme ? "☀️" : "🌙";
-                }
-                
-                // Save settings
-                SaveSettings();
-                
-                var themeName = _appSettings.DefaultDarkTheme ? "dark" : "light";
-                StatusBarText.Text = $"Default theme set to {themeName} and applied";
-            }
-        }
-        
-        private void ShowKeywordSettings()
-        {
-            var currentKeywords = string.Join(", ", _highlightKeywords);
-            var message = $"Current highlight keywords: {currentKeywords}\n\nEnter new keywords (comma-separated):";
-            
-            var input = Microsoft.VisualBasic.Interaction.InputBox(message, "Keyword Settings", currentKeywords);
-            
-            if (!string.IsNullOrEmpty(input))
-            {
-                _highlightKeywords.Clear();
-                var keywords = input.Split(',').Select(k => k.Trim()).Where(k => !string.IsNullOrEmpty(k));
-                foreach (var keyword in keywords)
-                {
-                    _highlightKeywords.Add(keyword);
-                }
-                
-                // Refresh log entries to apply new highlighting
-                RefreshLogEntries();
-                
-                StatusBarText.Text = $"Updated highlight keywords: {string.Join(", ", _highlightKeywords)}";
-            }
-        }
-        
-        private void ShowPerformanceSettings()
-        {
-            var message = $"Current performance settings:\n\n" +
-                         $"Max displayed entries: {_appSettings.MaxDisplayedEntries}\n" +
-                         $"Auto-refresh enabled: {_appSettings.AutoRefreshEnabled}\n" +
-                         $"Auto-scroll enabled: {_appSettings.AutoScrollEnabled}\n\n" +
-                         $"Enter new max displayed entries (current: {_appSettings.MaxDisplayedEntries}):";
-            
-            var input = Microsoft.VisualBasic.Interaction.InputBox(message, "Performance Settings", _appSettings.MaxDisplayedEntries.ToString());
-            
-            if (!string.IsNullOrEmpty(input) && int.TryParse(input, out int maxEntries) && maxEntries > 0)
-            {
-                _appSettings.MaxDisplayedEntries = maxEntries;
-                SaveSettings();
-                
-                StatusBarText.Text = $"Max displayed entries set to {maxEntries}";
-            }
-        }
-        
-        private void ThemeToggle_Click(object sender, RoutedEventArgs e)
-        {
-            _isDarkTheme = !_isDarkTheme;
-            _appSettings.DefaultDarkTheme = _isDarkTheme; // Update setting
-            ApplyTheme();
-            
-            // Update button icon
-            ThemeToggleButton.Content = _isDarkTheme ? "☀️" : "🌙";
-            
-            // Save the theme preference
-            SaveSettings();
-            
-            StatusBarText.Text = $"Switched to {(_isDarkTheme ? "dark" : "light")} theme";
-        }
-        
-        private void LoadSettings()
-        {
-            try
-            {
-                if (File.Exists(SETTINGS_FILE))
-                {
-                    var doc = XDocument.Load(SETTINGS_FILE);
-                    var root = doc.Root;
-                    
-                    if (root != null)
-                    {
-                        _appSettings.DefaultDarkTheme = bool.Parse(root.Element("DefaultDarkTheme")?.Value ?? "false");
-                        _appSettings.AutoRefreshEnabled = bool.Parse(root.Element("AutoRefreshEnabled")?.Value ?? "false");
-                        _appSettings.AutoScrollEnabled = bool.Parse(root.Element("AutoScrollEnabled")?.Value ?? "true");
-                        _appSettings.MaxDisplayedEntries = int.Parse(root.Element("MaxDisplayedEntries")?.Value ?? "10000");
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                // If loading fails, use defaults
-                _appSettings = new AppSettings();
-            }
-        }
-        
-        private void SaveSettings()
-        {
-            try
-            {
-                var doc = new XDocument(
-                    new XElement("Settings",
-                        new XElement("DefaultDarkTheme", _appSettings.DefaultDarkTheme),
-                        new XElement("AutoRefreshEnabled", _appSettings.AutoRefreshEnabled),
-                        new XElement("AutoScrollEnabled", _appSettings.AutoScrollEnabled),
-                        new XElement("MaxDisplayedEntries", _appSettings.MaxDisplayedEntries)
-                    )
-                );
-                
-                doc.Save(SETTINGS_FILE);
-            }
-            catch (Exception ex)
-            {
-                // Ignore save errors
-            }
-        }
-        
-        private void ApplyTheme()
-        {
-            try
-            {
-                if (_isDarkTheme)
-                {
-                    // Dark theme
-                    this.Background = new SolidColorBrush(Color.FromRgb(32, 32, 32));
-                    this.Foreground = new SolidColorBrush(Colors.White);
-                    
-                    // Update ListView background
-                    LogEntriesListView.Background = new SolidColorBrush(Color.FromRgb(24, 24, 24));
-                    LogEntriesListView.Foreground = new SolidColorBrush(Colors.LightGreen);
-                    
-                    // Update DataGrid background and styling
-                    LogFilesDataGrid.Background = new SolidColorBrush(Color.FromRgb(40, 40, 40));
-                    LogFilesDataGrid.Foreground = new SolidColorBrush(Colors.White);
-                    
-                    // Update DataGrid row background
-                    LogFilesDataGrid.RowBackground = new SolidColorBrush(Color.FromRgb(45, 45, 45));
-                    LogFilesDataGrid.AlternatingRowBackground = new SolidColorBrush(Color.FromRgb(50, 50, 50));
-                    
-                    // Update DataGrid header styling
-                    var headerStyle = new Style(typeof(DataGridColumnHeader));
-                    headerStyle.Setters.Add(new Setter(DataGridColumnHeader.BackgroundProperty, new SolidColorBrush(Color.FromRgb(60, 60, 60))));
-                    headerStyle.Setters.Add(new Setter(DataGridColumnHeader.ForegroundProperty, new SolidColorBrush(Colors.White)));
-                    headerStyle.Setters.Add(new Setter(DataGridColumnHeader.BorderBrushProperty, new SolidColorBrush(Color.FromRgb(80, 80, 80))));
-                    LogFilesDataGrid.ColumnHeaderStyle = headerStyle;
-                    
-                    // Update DataGrid cell styling
-                    var cellStyle = new Style(typeof(DataGridCell));
-                    cellStyle.Setters.Add(new Setter(DataGridCell.BackgroundProperty, new SolidColorBrush(Colors.Transparent)));
-                    cellStyle.Setters.Add(new Setter(DataGridCell.ForegroundProperty, new SolidColorBrush(Colors.White)));
-                    cellStyle.Setters.Add(new Setter(DataGridCell.BorderBrushProperty, new SolidColorBrush(Color.FromRgb(60, 60, 60))));
-                    LogFilesDataGrid.CellStyle = cellStyle;
-                    
-                    // Update status bar
-                    var statusBar = this.FindName("StatusBar") as System.Windows.Controls.Primitives.StatusBar;
-                    if (statusBar != null)
-                    {
-                        statusBar.Background = new SolidColorBrush(Color.FromRgb(48, 48, 48));
-                        statusBar.Foreground = new SolidColorBrush(Colors.White);
-                    }
-                }
-                else
-                {
-                    // Light theme
-                    this.Background = new SolidColorBrush(Colors.White);
-                    this.Foreground = new SolidColorBrush(Colors.Black);
-                    
-                    // Update ListView background
-                    LogEntriesListView.Background = new SolidColorBrush(Colors.White);
-                    LogEntriesListView.Foreground = new SolidColorBrush(Colors.Black);
-                    
-                    // Update DataGrid background and styling
-                    LogFilesDataGrid.Background = new SolidColorBrush(Colors.White);
-                    LogFilesDataGrid.Foreground = new SolidColorBrush(Colors.Black);
-                    
-                    // Update DataGrid row background
-                    LogFilesDataGrid.RowBackground = new SolidColorBrush(Colors.White);
-                    LogFilesDataGrid.AlternatingRowBackground = new SolidColorBrush(Color.FromRgb(248, 248, 248));
-                    
-                    // Update DataGrid header styling
-                    var headerStyle = new Style(typeof(DataGridColumnHeader));
-                    headerStyle.Setters.Add(new Setter(DataGridColumnHeader.BackgroundProperty, new SolidColorBrush(Color.FromRgb(230, 230, 230))));
-                    headerStyle.Setters.Add(new Setter(DataGridColumnHeader.ForegroundProperty, new SolidColorBrush(Colors.Black)));
-                    headerStyle.Setters.Add(new Setter(DataGridColumnHeader.BorderBrushProperty, new SolidColorBrush(Color.FromRgb(200, 200, 200))));
-                    LogFilesDataGrid.ColumnHeaderStyle = headerStyle;
-                    
-                    // Update DataGrid cell styling
-                    var cellStyle = new Style(typeof(DataGridCell));
-                    cellStyle.Setters.Add(new Setter(DataGridCell.BackgroundProperty, new SolidColorBrush(Colors.Transparent)));
-                    cellStyle.Setters.Add(new Setter(DataGridCell.ForegroundProperty, new SolidColorBrush(Colors.Black)));
-                    cellStyle.Setters.Add(new Setter(DataGridCell.BorderBrushProperty, new SolidColorBrush(Color.FromRgb(220, 220, 220))));
-                    LogFilesDataGrid.CellStyle = cellStyle;
-                    
-                    // Update status bar
-                    var statusBar = this.FindName("StatusBar") as System.Windows.Controls.Primitives.StatusBar;
-                    if (statusBar != null)
-                    {
-                        statusBar.Background = new SolidColorBrush(Color.FromRgb(240, 240, 240));
-                        statusBar.Foreground = new SolidColorBrush(Colors.Black);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                // Ignore theme application errors
-            }
-        }
-        
-        #endregion
-    }
-
-    public class LogFile : INotifyPropertyChanged
-    {
-        public Guid Id { get; set; }
-        public string Name { get; set; }
-        public string FilePath { get; set; }
-        public Brush Color { get; set; }
-        public int LineCount { get; set; }
-        public long FileSize { get; set; }
-
-        public string FileSizeFormatted
-        {
-            get
-            {
-                if (FileSize < 1024) return $"{FileSize} B";
-                if (FileSize < 1024 * 1024) return $"{FileSize / 1024:F1} KB";
-                if (FileSize < 1024 * 1024 * 1024) return $"{FileSize / (1024 * 1024):F1} MB";
-                return $"{FileSize / (1024 * 1024 * 1024):F1} GB";
-            }
-        }
-
-        private string _alias;
-        public string Alias
-        {
-            get => _alias;
-            set
-            {
-                _alias = value;
-                OnPropertyChanged(nameof(Alias));
-            }
-        }
-
-        private bool _isVisible;
-        public bool IsVisible
-        {
-            get => _isVisible;
-            set
-            {
-                _isVisible = value;
-                OnPropertyChanged(nameof(IsVisible));
-                OnPropertyChanged(nameof(VisibilityButtonText));
-            }
-        }
-
-        public string VisibilityButtonText => IsVisible ? "Hide" : "Show";
-
-        public event PropertyChangedEventHandler PropertyChanged;
-        protected virtual void OnPropertyChanged(string propertyName)
-        {
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
-        }
-    }
-
-    public class LogEntry : INotifyPropertyChanged
-    {
-        public string Content { get; set; }
-        public int LineNumber { get; set; }
-        public Guid FileId { get; set; }
-        public Brush Color { get; set; }
-        public DateTime Timestamp { get; set; }
-        public bool HasTimestamp { get; set; }
-        public List<TextSegment> HighlightedContent { get; set; } = new List<TextSegment>();
-
-        private string _alias;
-        public string Alias
-        {
-            get => _alias;
-            set
-            {
-                _alias = value;
-                OnPropertyChanged(nameof(Alias));
-            }
-        }
-
-        public string TimestampString => HasTimestamp ? Timestamp.ToString("MMM dd HH:mm:ss") : "";
-
-        public TextBlock FormattedContent
-        {
-            get
-            {
-                var textBlock = new TextBlock();
-                foreach (var segment in HighlightedContent)
-                {
-                    var run = new Run(segment.Text);
-                    if (segment.IsHighlighted)
-                    {
-                        run.FontWeight = FontWeights.Bold;
-                        run.Foreground = Brushes.Yellow;
-                    }
-                    textBlock.Inlines.Add(run);
-                }
-                return textBlock;
-            }
-        }
-
-        public event PropertyChangedEventHandler PropertyChanged;
-        protected virtual void OnPropertyChanged(string propertyName)
-        {
-            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
-        }
-    }
-
-    public class LogViewerConfiguration
-    {
-        public List<string> Keywords { get; set; } = new List<string>();
-        public List<LogFileConfig> LogFiles { get; set; } = new List<LogFileConfig>();
-        public int MaxLinesPerFile { get; set; } = 50000;
-        public bool ShowLineRateWarning { get; set; } = true;
-    }
-
-    public class LogFileConfig
-    {
-        public string FilePath { get; set; }
-        public string Alias { get; set; }
-        public bool IsVisible { get; set; }
-    }
-
-    public class TextSegment
-    {
-        public string Text { get; set; }
-        public bool IsHighlighted { get; set; }
-    }
-    
-    [Serializable]
-    public class FilterPreset
-    {
-        public string Name { get; set; }
-        public string SearchText { get; set; }
-        public bool IsRegex { get; set; }
-        public bool IsCaseSensitive { get; set; }
-        public string SearchColumn { get; set; }
-        public HashSet<string> ActiveLogLevels { get; set; } = new HashSet<string>();
-        public int TimeFilterSeconds { get; set; } = 30;
-    }
-
-    public class FilterSettings
-    {
-        public string Name { get; set; }
-        public string SearchText { get; set; }
-        public bool IsRegex { get; set; }
-        public bool IsCaseSensitive { get; set; }
-        public string SelectedColumn { get; set; }
-        public HashSet<string> ActiveLogLevels { get; set; } = new HashSet<string>();
-        public bool HasTimeFilter { get; set; }
-        public int TimeFilterSeconds { get; set; }
-    }
-    
-    public class AppSettings
-    {
-        public bool DefaultDarkTheme { get; set; } = false;
-        public bool AutoRefreshEnabled { get; set; } = false;
-        public bool AutoScrollEnabled { get; set; } = true;
-        public int MaxDisplayedEntries { get; set; } = 10000;
-    }
-}
+                    if (!string.IsNullOrEmpty(SearchText
