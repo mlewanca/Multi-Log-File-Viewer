@@ -17,6 +17,7 @@ namespace LogViewer
         private HashSet<string> _keywords;
         private int _maxLinesPerFile;
         private bool _showLineRateWarning;
+        private AppSettings _appSettings;
         private ObservableCollection<RecurringLine> _recurringLines = new ObservableCollection<RecurringLine>();
         
         public HashSet<string> Keywords => _keywords;
@@ -34,7 +35,7 @@ namespace LogViewer
             public bool IsSelectedForExport { get; set; }
         }
 
-        public SettingsWindow(ObservableCollection<LogFile> logFiles, HashSet<string> keywords, int maxLinesPerFile, bool showLineRateWarning)
+        public SettingsWindow(ObservableCollection<LogFile> logFiles, HashSet<string> keywords, int maxLinesPerFile, bool showLineRateWarning, AppSettings appSettings)
         {
             InitializeComponent();
             
@@ -42,11 +43,14 @@ namespace LogViewer
             _keywords = new HashSet<string>(keywords, StringComparer.OrdinalIgnoreCase);
             _maxLinesPerFile = maxLinesPerFile;
             _showLineRateWarning = showLineRateWarning;
+            _appSettings = appSettings;
             
             // Populate the UI
             LoadKeywordsIntoTextBox();
             LoadAliasesIntoDataGrid();
             LoadLineRateLimitSettings();
+            LoadThemeSettings();
+            LoadPerformanceSettings();
             
             // Initialize recurring lines data grid
             RecurringLinesDataGrid.ItemsSource = _recurringLines;
@@ -55,6 +59,18 @@ namespace LogViewer
         private void LoadKeywordsIntoTextBox()
         {
             KeywordsTextBox.Text = string.Join(Environment.NewLine, _keywords.OrderBy(k => k));
+        }
+
+        private void LoadThemeSettings()
+        {
+            DefaultDarkThemeCheckBox.IsChecked = _appSettings.DefaultDarkTheme;
+        }
+
+        private void LoadPerformanceSettings()
+        {
+            MaxEntriesTextBox.Text = _appSettings.MaxDisplayedEntries.ToString();
+            AutoRefreshCheckBox.IsChecked = _appSettings.AutoRefreshEnabled;
+            AutoScrollCheckBox.IsChecked = _appSettings.AutoScrollEnabled;
         }
 
         private void LoadAliasesIntoDataGrid()
@@ -114,6 +130,23 @@ namespace LogViewer
             }
 
             _showLineRateWarning = ShowWarningCheckBox.IsChecked ?? true;
+
+            // Update theme settings
+            _appSettings.DefaultDarkTheme = DefaultDarkThemeCheckBox.IsChecked ?? false;
+
+            // Update performance settings
+            if (int.TryParse(MaxEntriesTextBox.Text, out int maxEntries) && maxEntries > 0)
+            {
+                _appSettings.MaxDisplayedEntries = maxEntries;
+            }
+            else
+            {
+                MessageBox.Show("Please enter a valid positive number for maximum entries.", "Invalid Input", MessageBoxButton.OK, MessageBoxImage.Warning);
+                return;
+            }
+
+            _appSettings.AutoRefreshEnabled = AutoRefreshCheckBox.IsChecked ?? false;
+            _appSettings.AutoScrollEnabled = AutoScrollCheckBox.IsChecked ?? false;
 
             DialogResult = true;
             Close();

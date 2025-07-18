@@ -102,6 +102,64 @@
                 </Grid>
             </TabItem>
             
+            <!-- Theme Tab -->
+            <TabItem Header="Theme">
+                <Grid Margin="10">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Text="Theme Settings:" FontWeight="Bold" Margin="0,0,0,20"/>
+
+                    <CheckBox Grid.Row="1" Name="DefaultDarkThemeCheckBox" Content="Use Dark Theme by Default" 
+                              Margin="0,0,0,15" ToolTip="Set the default theme preference for the application. This setting will be applied when the application starts."/>
+
+                    <TextBlock Grid.Row="2" Text="Note: Theme changes will take effect after restarting the application." 
+                               TextWrapping="Wrap" Foreground="Gray" FontStyle="Italic" Margin="0,0,0,10"/>
+                </Grid>
+            </TabItem>
+
+            <!-- Performance Tab -->
+            <TabItem Header="Performance">
+                <Grid Margin="10">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Text="Performance Settings:" FontWeight="Bold" Margin="0,0,0,20"/>
+
+                    <Grid Grid.Row="1" Margin="0,0,0,15">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="100"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        
+                        <TextBlock Grid.Column="0" Text="Maximum displayed entries:" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                        <TextBox Grid.Column="1" Name="MaxEntriesTextBox" Text="10000" 
+                                 VerticalAlignment="Center" HorizontalAlignment="Left" Width="80" ToolTip="Maximum number of log entries to display at once. Higher numbers may impact performance."/>
+                        <TextBlock Grid.Column="2" Text="entries" VerticalAlignment="Center" Margin="10,0,0,0" Foreground="Gray"/>
+                    </Grid>
+
+                    <CheckBox Grid.Row="2" Name="AutoRefreshCheckBox" Content="Enable Auto-refresh" 
+                              Margin="0,0,0,15" ToolTip="Automatically refresh log files when they change. This may impact performance with large files."/>
+
+                    <CheckBox Grid.Row="3" Name="AutoScrollCheckBox" Content="Enable Auto-scroll" 
+                              Margin="0,0,0,15" ToolTip="Automatically scroll to the latest log entry when new entries are added."/>
+
+                    <TextBlock Grid.Row="4" Text="Note: Performance settings affect how the application handles large log files and real-time updates." 
+                               TextWrapping="Wrap" Foreground="Gray" FontStyle="Italic" Margin="0,0,0,10"/>
+                </Grid>
+            </TabItem>
+
             <!-- Recurring Lines Tab -->
             <TabItem Header="Recurring Lines">
                 <Grid Margin="10">

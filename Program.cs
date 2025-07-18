@@ -1791,31 +1791,18 @@ namespace LogViewer
         
         private void Settings_Click(object sender, RoutedEventArgs e)
         {
-            // Show settings menu options
-            var settingsOptions = "Settings Options:\n\n" +
-                                "1. Theme Settings (Default theme preference)\n" +
-                                "2. Keyword Highlighting Settings\n" +
-                                "3. Performance Settings\n\n" +
-                                "Choose an option (1-3) or Cancel:";
-            
-            var input = Microsoft.VisualBasic.Interaction.InputBox(settingsOptions, "Settings", "1");
-            
-            if (string.IsNullOrEmpty(input)) return;
-            
-            switch (input.Trim())
+            var settingsWindow = new SettingsWindow(_logFiles, _highlightKeywords, _maxLinesPerFile, _showLineRateWarning, _appSettings);
+            if (settingsWindow.ShowDialog() == true)
             {
-                case "1":
-                    ShowThemeSettings();
-                    break;
-                case "2":
-                    ShowKeywordSettings();
-                    break;
-                case "3":
-                    ShowPerformanceSettings();
-                    break;
-                default:
-                    MessageBox.Show("Invalid option. Please choose 1, 2, or 3.", "Settings", MessageBoxButton.OK, MessageBoxImage.Information);
-                    break;
+                // Update UI with new settings
+                ThemeToggleButton.Content = _appSettings.DefaultDarkTheme ? "☀️" : "🌙";
+                _autoScroll = _appSettings.AutoScrollEnabled;
+                _autoRefreshEnabled = _appSettings.AutoRefreshEnabled;
+                _maxLinesPerFile = _appSettings.MaxDisplayedEntries;
+                ApplyTheme();
+                
+                // Save settings
+                SaveSettings();
             }
         }
         
